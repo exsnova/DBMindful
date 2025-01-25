@@ -6,33 +6,102 @@ class DBMonitor:
     def __init__(self):
         self.db_connection = DatabaseConnection
 
-    def get_heavy_queries(self) -> pd.DataFrame:
-        """Fetch the most resource-intensive queries"""
-        with self.db_connection.get_connection() as conn:
-            query = """
-            SELECT 
-                query as query_preview,
-                calls,
-                total_exec_time,
-                total_exec_time/calls as avg_exec_time,
-                rows,
-                shared_blks_hit + shared_blks_read as total_blocks
-            FROM pg_stat_statements s
-            JOIN pg_database d ON d.oid = s.dbid
-            WHERE d.datname = current_database()
-            AND query NOT ILIKE 'BEGIN%'
-            AND query NOT ILIKE 'COMMIT%'
-            AND query NOT ILIKE 'ROLLBACK%'
-            AND query NOT ILIKE '%pg_stat_statements%'
-            AND query NOT ILIKE 'SELECT schemaname%'
-            AND query NOT ILIKE 'SELECT%relname%'
-            AND query NOT ILIKE 'SHOW%'
-            AND query NOT ILIKE 'SELECT EXISTS%'
-            AND query NOT ILIKE '%pg_size_pretty%'
-            ORDER BY total_exec_time DESC
-            LIMIT 10;
-            """
-            return pd.read_sql(query, conn)
+# core/db_monitor.py
+import pandas as pd
+from models.database import DatabaseConnection
+import logging
+from typing import Optional, Dict
+
+class DBMonitor:
+    def __init__(self):
+        self.db_connection = DatabaseConnection
+
+    def get_heavy_queries(self) -> Optional[pd.DataFrame]:
+        """Fetch the most resource-intensive queries with graceful fallback"""
+        try:
+            with self.db_connection.get_connection() as conn:
+                # First check if pg_stat_statements is available
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+                        );
+                    """)
+                    has_pg_stat = cur.fetchone()[0]
+                    
+                    if not has_pg_stat:
+                        # Fallback to basic query monitoring
+                        query = """
+                        SELECT 
+                            query as query_preview,
+                            pid as calls,
+                            EXTRACT(EPOCH FROM (now() - query_start)) * 1000 as total_exec_time,
+                            EXTRACT(EPOCH FROM (now() - query_start)) * 1000 as avg_exec_time,
+                            0 as rows,
+                            0 as total_blocks
+                        FROM pg_stat_activity 
+                        WHERE state = 'active'
+                        AND query NOT LIKE '%pg_stat_activity%'
+                        ORDER BY query_start DESC
+                        LIMIT 10;
+                        """
+                    else:
+                        # Use full pg_stat_statements query
+                        query = """
+                        SELECT 
+                            query as query_preview,
+                            calls,
+                            total_exec_time,
+                            total_exec_time/calls as avg_exec_time,
+                            rows,
+                            shared_blks_hit + shared_blks_read as total_blocks
+                        FROM pg_stat_statements s
+                        JOIN pg_database d ON d.oid = s.dbid
+                        WHERE d.datname = current_database()
+                        AND query NOT ILIKE 'BEGIN%'
+                        AND query NOT ILIKE 'COMMIT%'
+                        ORDER BY total_exec_time DESC
+                        LIMIT 10;
+                        """
+                        
+                return pd.read_sql(query, conn)
+                
+        except Exception as e:
+            logging.error(f"Error fetching query data: {e}")
+            return None
+
+    def get_monitoring_status(self) -> Dict:
+        """Get comprehensive monitoring status with basic stats"""
+        try:
+            # Get basic stats that don't require pg_stat_statements
+            basic_stats = self.db_connection.get_basic_stats()
+            
+            # Try to get pg_stat_statements status
+            with self.db_connection.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+                        );
+                    """)
+                    has_extension = cur.fetchone()[0]
+                    
+                    status = {
+                        **basic_stats,
+                        'pg_stat_statements_enabled': has_extension,
+                        'monitoring_level': 'Full' if has_extension else 'Basic'
+                    }
+                    
+                    if has_extension:
+                        # Get additional pg_stat_statements specific info
+                        cur.execute("SELECT pg_stat_statements_reset();")
+                        status['stats_reset'] = True
+                        
+                    return status
+                    
+        except Exception as e:
+            logging.error(f"Error checking monitoring status: {e}")
+            return {'error': str(e)}
 
     def reset_query_stats(self):
         """Reset query statistics in pg_stat_statements"""

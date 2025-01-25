@@ -42,55 +42,43 @@ class Dashboard:
     def render_monitoring_status(self):
         """Render monitoring prerequisites status"""
         st.subheader("Monitoring Status")
-        status = self.db_monitor.check_monitoring_prerequisites()
+        status = self.db_monitor.get_monitoring_status()
         
         if 'error' in status:
             st.error(f"Error checking monitoring status: {status['error']}")
             return
             
-        cols = st.columns(3)
+        # Display monitoring level
+        cols = st.columns(4)
         with cols[0]:
             st.metric(
-                "pg_stat_statements Extension",
-                "Installed ✅" if status['extension_installed'] else "Not Installed ❌"
+                "Monitoring Level",
+                status.get('monitoring_level', 'Unknown')
             )
         with cols[1]:
-            st.metric("Track Setting", status['track_setting'])
+            st.metric(
+                "Database Size",
+                status.get('database_size', 'Unknown')
+            )
         with cols[2]:
-            st.metric("Tracked Queries", status['tracked_queries'])
-            
-        # Show configuration status
-        st.write("### Configuration Details")
-        st.code(f"""
-Current Configuration:
-- shared_preload_libraries: {status['shared_preload']}
-- track_utility: {status['track_utility']}
-- Number of tracked queries: {status['tracked_queries']}
-        """)
-            
-        if not status['extension_installed'] or status['tracked_queries'] == 0:
-            st.warning("""
-                #### Required Configuration Steps:
-                
-                1. Add to postgresql.conf:
-                ```
-                shared_preload_libraries = 'pg_stat_statements'
-                pg_stat_statements.track = 'all'
-                pg_stat_statements.max = 10000
-                ```
-                
-                2. Restart PostgreSQL
-                
-                3. Run in database:
-                ```sql
-                CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
-                ```
-                
-                4. Reset statistics:
-                ```sql
-                SELECT pg_stat_statements_reset();
-                ```
+            st.metric(
+                "Table Count",
+                status.get('table_count', 'Unknown')
+            )
+        with cols[3]:
+            st.metric(
+                "Active Connections",
+                status.get('active_connections', 'Unknown')
+            )
+        
+        # Show appropriate message based on monitoring level
+        if status.get('monitoring_level') == 'Basic':
+            st.info("""
+                Running in basic monitoring mode. Some advanced features are limited.
+                Basic statistics and active query monitoring are available.
             """)
+        elif status.get('monitoring_level') == 'Full':
+            st.success("Full monitoring capabilities are enabled.")
 
     def render_query_analysis(self):
         """Render the query analysis section"""
